@@ -524,3 +524,13 @@ func headerValue(headers map[string][]string, name string) string {
 	}
 	return values[0]
 }
+
+
+func (s *pluginRoutingState) reset() {
+	s.mu.Lock()
+	s.LastPicked = nil
+	s.Weighted = nil
+	s.Sessions = nil
+	s.LastSessionCleanup = time.Time{}
+	s.mu.Unlock()
+}
