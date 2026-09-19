@@ -48,6 +48,7 @@ func configure(raw []byte) error {
 		return err
 	}
 	currentConfig.Store(cfg)
+	routingState.reset()
 	return nil
 }
 
