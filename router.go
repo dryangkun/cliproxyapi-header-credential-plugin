@@ -16,8 +16,11 @@ import (
 const (
 	methodPluginRegister    = "plugin.register"
 	methodPluginReconfigure = "plugin.reconfigure"
-	methodSchedulerPick     = "scheduler.pick"
-	pluginName              = "header-credential-router"
+	methodSchedulerPick          = "scheduler.pick"
+	methodRequestInterceptBefore = "request.intercept_before"
+	methodRequestInterceptAfter  = "request.intercept_after"
+	methodHostLog                = "host.log"
+	pluginName                   = "header-credential-router"
 )
 
 var (
@@ -53,6 +56,7 @@ type registration struct {
 type registrationCapabilities struct {
 	Scheduler                 bool `json:"scheduler"`
 	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities,omitempty"`
+	RequestInterceptor        bool `json:"request_interceptor"`
 }
 
 type schedulerPickRequest struct {
@@ -81,6 +85,15 @@ type schedulerPickResponse struct {
 	AuthID          string `json:"AuthID"`
 	DelegateBuiltin string `json:"DelegateBuiltin"`
 	Handled         bool   `json:"Handled"`
+}
+
+type requestInterceptRequest struct {
+	RequestID string              `json:"RequestID"`
+	Headers   map[string][]string `json:"Headers"`
+}
+
+type requestInterceptResponse struct {
+	ClearHeaders []string `json:"ClearHeaders,omitempty"`
 }
 
 type sessionBinding struct {
@@ -112,6 +125,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return okEnvelope(pluginRegistration())
 	case methodSchedulerPick:
 		return pickCredential(request)
+	case methodRequestInterceptBefore:
+		return okEnvelope(requestInterceptResponse{})
+	case methodRequestInterceptAfter:
+		return interceptRequestAfterAuth(request)
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method, http.StatusBadRequest), nil
 	}
@@ -122,7 +139,7 @@ func pluginRegistration() registration {
 		SchemaVersion: schemaVersion,
 		Metadata: pluginMetadata{
 			Name:             pluginName,
-			Version:          "0.3.0",
+			Version:          "0.4.0",
 			Author:           "dryangkun",
 			GitHubRepository: "https://github.com/dryangkun/cliproxyapi-header-credential-plugin",
 			ConfigFields: []configField{
@@ -130,6 +147,7 @@ func pluginRegistration() registration {
 				{Name: "strategy", Type: "enum", EnumValues: []string{"round-robin", "weighted-round-robin", "fill-first"}, Description: "Routing strategy used inside the requested credential pool."},
 				{Name: "session_affinity", Type: "boolean", Description: "Keep explicit client sessions pinned to the same credential while it remains available."},
 				{Name: "session_affinity_ttl", Type: "string", Description: "Session binding lifetime, for example 1h or 30m."},
+				{Name: "log_level", Type: "enum", EnumValues: []string{"off", "info", "debug"}, Description: "Plugin routing log verbosity."},
 				{Name: "missing_behavior", Type: "enum", EnumValues: []string{"fallback", "reject"}, Description: "Action when the credential pool header is absent."},
 				{Name: "not_found_behavior", Type: "enum", EnumValues: []string{"fallback", "reject"}, Description: "Action when none of the requested credential IDs are currently available."},
 			},
@@ -137,6 +155,7 @@ func pluginRegistration() registration {
 		Capabilities: registrationCapabilities{
 			Scheduler:                 true,
 			SchedulerAcrossPriorities: true,
+			RequestInterceptor:        true,
 		},
 	}
 }
@@ -150,14 +169,35 @@ func pickCredential(raw []byte) ([]byte, error) {
 	cfg := loadedConfig()
 	requestedIDs := parseCredentialIDs(headerValues(req.Options.Headers, cfg.Header))
 	if len(requestedIDs) == 0 {
+		pluginLog(cfg, "debug", "credential pool header missing", map[string]any{
+			"header": cfg.Header,
+			"behavior": cfg.MissingBehavior,
+			"provider": req.Provider,
+			"model": req.Model,
+		})
 		if cfg.MissingBehavior == "reject" {
 			return errorEnvelope("credential_header_required", fmt.Sprintf("request header %s is required", cfg.Header), http.StatusBadRequest), nil
 		}
 		return okEnvelope(schedulerPickResponse{Handled: false})
 	}
 
+	pluginLog(cfg, "debug", "credential pool routing input", map[string]any{
+		"header": cfg.Header,
+		"requested_auth_ids": requestedIDs,
+		"candidate_auth_ids": candidateIDs(req.Candidates),
+		"provider": req.Provider,
+		"model": req.Model,
+		"strategy": cfg.Strategy,
+	})
+
 	candidates := filterCredentialCandidates(requestedIDs, req.Candidates)
 	if len(candidates) == 0 {
+		pluginLog(cfg, "info", "credential pool has no currently eligible credentials", map[string]any{
+			"requested_auth_ids": requestedIDs,
+			"provider": req.Provider,
+			"model": req.Model,
+			"behavior": cfg.NotFoundBehavior,
+		})
 		if cfg.NotFoundBehavior == "fallback" {
 			return okEnvelope(schedulerPickResponse{Handled: false})
 		}
@@ -173,24 +213,98 @@ func pickCredential(raw []byte) ([]byte, error) {
 
 	if cfg.SessionAffinity {
 		if sessionID := explicitSessionID(req.Options.Headers); sessionID != "" {
-			if authID := routingState.lookupSession(routeKey, sessionID, candidates, cfg.SessionAffinityTTL); authID != "" {
+			authID, affinityState := routingState.lookupSession(routeKey, sessionID, candidates, cfg.SessionAffinityTTL)
+			if authID != "" {
+				pluginLog(cfg, "info", "session affinity credential reused", map[string]any{
+					"auth_id": authID,
+					"provider": req.Provider,
+					"model": req.Model,
+					"pool_size": len(candidates),
+				})
 				return okEnvelope(schedulerPickResponse{AuthID: authID, Handled: true})
 			}
+			if affinityState == "unavailable" || affinityState == "expired" {
+				pluginLog(cfg, "info", "session affinity binding requires reselection", map[string]any{
+					"reason": affinityState,
+					"provider": req.Provider,
+					"model": req.Model,
+				})
+			}
 
-			selected, err := routingState.pick(cfg.Strategy, routeKey, highestPriorityCandidates(candidates))
+			routingCandidates := highestPriorityCandidates(candidates)
+			selected, err := routingState.pick(cfg.Strategy, routeKey, routingCandidates)
 			if err != nil {
 				return nil, err
 			}
 			routingState.bindSession(routeKey, sessionID, selected.ID, cfg.SessionAffinityTTL)
+			pluginLog(cfg, "info", "credential selected and session affinity bound", map[string]any{
+				"auth_id": selected.ID,
+				"strategy": cfg.Strategy,
+				"provider": req.Provider,
+				"model": req.Model,
+				"eligible_pool_size": len(candidates),
+				"routing_pool_size": len(routingCandidates),
+			})
 			return okEnvelope(schedulerPickResponse{AuthID: selected.ID, Handled: true})
 		}
 	}
 
-	selected, err := routingState.pick(cfg.Strategy, routeKey, highestPriorityCandidates(candidates))
+	routingCandidates := highestPriorityCandidates(candidates)
+	selected, err := routingState.pick(cfg.Strategy, routeKey, routingCandidates)
 	if err != nil {
 		return nil, err
 	}
+	pluginLog(cfg, "info", "credential selected from request pool", map[string]any{
+		"auth_id": selected.ID,
+		"strategy": cfg.Strategy,
+		"provider": req.Provider,
+		"model": req.Model,
+		"eligible_pool_size": len(candidates),
+		"routing_pool_size": len(routingCandidates),
+	})
 	return okEnvelope(schedulerPickResponse{AuthID: selected.ID, Handled: true})
+}
+
+func interceptRequestAfterAuth(raw []byte) ([]byte, error) {
+	var req requestInterceptRequest
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, fmt.Errorf("decode request interceptor request: %w", err)
+		}
+	}
+
+	cfg := loadedConfig()
+	if len(headerValues(req.Headers, cfg.Header)) > 0 {
+		pluginLog(cfg, "debug", "routing header removed before upstream request", map[string]any{
+			"header": cfg.Header,
+		})
+	}
+	return okEnvelope(requestInterceptResponse{ClearHeaders: []string{cfg.Header}})
+}
+
+func pluginLog(cfg pluginConfig, level, message string, fields map[string]any) {
+	if cfg.LogLevel == "off" {
+		return
+	}
+	level = strings.ToLower(strings.TrimSpace(level))
+	if cfg.LogLevel == "info" && level == "debug" {
+		return
+	}
+	_, _ = callHost(methodHostLog, map[string]any{
+		"level": level,
+		"message": message,
+		"fields": fields,
+	})
+}
+
+func candidateIDs(candidates []schedulerAuthCandidate) []string {
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if id := strings.TrimSpace(candidate.ID); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func parseCredentialIDs(values []string) []string {
@@ -439,7 +553,7 @@ func saturatingAdd(value, delta int64) int64 {
 	return value + delta
 }
 
-func (s *pluginRoutingState) lookupSession(routeKey, sessionID string, candidates []schedulerAuthCandidate, ttl time.Duration) string {
+func (s *pluginRoutingState) lookupSession(routeKey, sessionID string, candidates []schedulerAuthCandidate, ttl time.Duration) (string, string) {
 	now := time.Now()
 	cacheKey := routeKey + "::session::" + sessionID
 
@@ -448,22 +562,25 @@ func (s *pluginRoutingState) lookupSession(routeKey, sessionID string, candidate
 	s.cleanupSessionsLocked(now, ttl)
 
 	if s.Sessions == nil {
-		return ""
+		return "", "miss"
 	}
 	binding, ok := s.Sessions[cacheKey]
-	if !ok || !binding.ExpiresAt.After(now) {
+	if !ok {
+		return "", "miss"
+	}
+	if !binding.ExpiresAt.After(now) {
 		delete(s.Sessions, cacheKey)
-		return ""
+		return "", "expired"
 	}
 	for _, candidate := range candidates {
 		if candidate.ID == binding.AuthID {
 			binding.ExpiresAt = now.Add(ttl)
 			s.Sessions[cacheKey] = binding
-			return binding.AuthID
+			return binding.AuthID, "hit"
 		}
 	}
 	delete(s.Sessions, cacheKey)
-	return ""
+	return "", "unavailable"
 }
 
 func (s *pluginRoutingState) bindSession(routeKey, sessionID, authID string, ttl time.Duration) {
