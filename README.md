@@ -142,6 +142,63 @@ The plugin ID is:
 header-credential-router
 ```
 
+## Scheduler precedence in CLIProxyAPI
+
+No extra CPA setting is required to make this plugin run before the built-in credential selector.
+
+In normal local credential mode, CLIProxyAPI's selection flow is:
+
+```text
+eligible credentials
+        ↓
+Plugin Scheduler
+        ↓
+Handled=true
+   ├─ yes → use plugin-selected AuthID
+   └─ no  → fall back to CPA built-in selector
+```
+
+This means that once `header-credential-router` is loaded and registered as a Scheduler plugin, it is consulted before CPA's built-in `round-robin`, `weighted-round-robin`, `fill-first`, or session-affinity selector.
+
+The plugin only yields back to the built-in selector when it returns `Handled=false`. In this plugin that can happen, for example, when:
+
+- `X-CPA-Credentials` is missing and `missing_behavior: fallback`;
+- no requested credential is currently eligible and `not_found_behavior: fallback`.
+
+For strict key-to-credential-pool isolation, use:
+
+```yaml
+missing_behavior: fallback
+not_found_behavior: reject
+```
+
+With this configuration, ordinary requests without the Nginx routing header can still use CPA's normal selector, while requests that do contain a credential pool cannot escape that pool when all listed credentials are unavailable.
+
+### Multiple Scheduler plugins
+
+CLIProxyAPI does not chain all Scheduler plugins. It selects the first active Scheduler plugin from the plugin records sorted by:
+
+1. higher `priority` first;
+2. plugin ID as a deterministic tie-breaker.
+
+Therefore, if other Scheduler plugins are installed, configure this plugin with a higher priority, for example:
+
+```yaml
+plugins:
+  configs:
+    header-credential-router:
+      enabled: true
+      priority: 1000
+```
+
+If this is the only Scheduler plugin, the exact priority value does not matter.
+
+### Home dispatch mode caveat
+
+CLIProxyAPI's Home credential-dispatch path is checked before the local/plugin scheduler path. If the auth manager is actually running with Home dispatch enabled, credential selection goes through Home and this Scheduler plugin is bypassed.
+
+Using a management UI or plugin-store registry by itself is not the important distinction; the relevant condition is whether CPA is using Home for credential dispatch.
+
 ## CLIProxyAPI host configuration
 
 CLIProxyAPI disables dynamic-library plugins by default, so the host must explicitly enable them.
