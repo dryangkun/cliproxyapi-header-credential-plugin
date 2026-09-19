@@ -120,9 +120,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() {
-	authCache.invalidate()
-}
+func cliproxyPluginShutdown() {}
 
 func callHost(method string, payload any) (json.RawMessage, error) {
 	rawPayload, err := json.Marshal(payload)
