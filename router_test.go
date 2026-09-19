@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -138,9 +139,9 @@ func TestSessionAffinityKeepsAvailableBinding(t *testing.T) {
 	if _, err := routingState.pick("round-robin", routeKey, candidates); err != nil {
 		t.Fatal(err)
 	}
-	got := routingState.lookupSession(routeKey, "session-1", candidates, time.Hour)
-	if got != selected.ID {
-		t.Fatalf("got=%s want=%s", got, selected.ID)
+	got, status := routingState.lookupSession(routeKey, "session-1", candidates, time.Hour)
+	if got != selected.ID || status != "hit" {
+		t.Fatalf("got=%s status=%s want=%s", got, status, selected.ID)
 	}
 }
 
@@ -153,9 +154,9 @@ func TestSessionAffinityCanKeepLowerPriorityBinding(t *testing.T) {
 		{ID: "high.json", Priority: 100},
 		{ID: "low.json", Priority: 10},
 	}
-	got := routingState.lookupSession(routeKey, "session-1", candidates, time.Hour)
-	if got != "low.json" {
-		t.Fatalf("got=%s", got)
+	got, status := routingState.lookupSession(routeKey, "session-1", candidates, time.Hour)
+	if got != "low.json" || status != "hit" {
+		t.Fatalf("got=%s status=%s", got, status)
 	}
 }
 
@@ -165,8 +166,8 @@ func TestSessionAffinityDropsUnavailableBinding(t *testing.T) {
 	routingState.bindSession(routeKey, "session-1", "a.json", time.Hour)
 
 	candidates := []schedulerAuthCandidate{{ID: "b.json", Priority: 10}}
-	if got := routingState.lookupSession(routeKey, "session-1", candidates, time.Hour); got != "" {
-		t.Fatalf("unexpected binding=%s", got)
+	if got, status := routingState.lookupSession(routeKey, "session-1", candidates, time.Hour); got != "" || status != "unavailable" {
+		t.Fatalf("unexpected binding=%s status=%s", got, status)
 	}
 }
 
@@ -186,6 +187,7 @@ header: X-Route-Credentials
 strategy: weighted-round-robin
 session_affinity: true
 session_affinity_ttl: 30m
+log_level: debug
 missing_behavior: reject
 not_found_behavior: fallback
 priority: 100 # host-owned and ignored
@@ -197,6 +199,7 @@ priority: 100 # host-owned and ignored
 		cfg.Strategy != "weighted-round-robin" ||
 		!cfg.SessionAffinity ||
 		cfg.SessionAffinityTTL != 30*time.Minute ||
+		cfg.LogLevel != "debug" ||
 		cfg.MissingBehavior != "reject" ||
 		cfg.NotFoundBehavior != "fallback" {
 		t.Fatalf("cfg=%+v", cfg)
@@ -208,14 +211,40 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Header != "X-CPA-Credentials" ||
 		cfg.Strategy != "round-robin" ||
 		!cfg.SessionAffinity ||
-		cfg.SessionAffinityTTL != time.Hour {
+		cfg.SessionAffinityTTL != time.Hour ||
+		cfg.LogLevel != "info" {
 		t.Fatalf("cfg=%+v", cfg)
 	}
 }
 
 func TestRegistrationRequestsCandidatesAcrossPriorities(t *testing.T) {
 	reg := pluginRegistration()
-	if !reg.Capabilities.Scheduler || !reg.Capabilities.SchedulerAcrossPriorities {
+	if !reg.Capabilities.Scheduler || !reg.Capabilities.SchedulerAcrossPriorities || !reg.Capabilities.RequestInterceptor {
 		t.Fatalf("capabilities=%+v", reg.Capabilities)
+	}
+}
+
+func TestInterceptAfterAuthClearsRoutingHeader(t *testing.T) {
+	currentConfig.Store(defaultConfig())
+	raw := []byte(`{"RequestID":"req-1","Headers":{"X-CPA-Credentials":["a.json,b.json"],"Authorization":["Bearer x"]}}`)
+	respRaw, err := interceptRequestAfterAuth(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env envelope
+	if err := json.Unmarshal(respRaw, &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK {
+		t.Fatalf("envelope error: %+v", env.Error)
+	}
+
+	var resp requestInterceptResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ClearHeaders) != 1 || resp.ClearHeaders[0] != "X-CPA-Credentials" {
+		t.Fatalf("clear headers=%v", resp.ClearHeaders)
 	}
 }
