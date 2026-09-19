@@ -290,6 +290,10 @@ func pluginLog(cfg pluginConfig, level, message string, fields map[string]any) {
 	if cfg.LogLevel == "info" && level == "debug" {
 		return
 	}
+	if fields == nil {
+		fields = make(map[string]any)
+	}
+	fields["plugin"] = pluginName
 	_, _ = callHost(methodHostLog, map[string]any{
 		"level": level,
 		"message": message,
