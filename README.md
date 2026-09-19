@@ -142,6 +142,81 @@ The plugin ID is:
 header-credential-router
 ```
 
+## CLIProxyAPI host configuration
+
+CLIProxyAPI disables dynamic-library plugins by default, so the host must explicitly enable them.
+
+A minimal CPA configuration is:
+
+```yaml
+# Required only if you want the plugin's debug-level host.log messages.
+# The plugin works normally with debug: false.
+debug: true
+
+plugins:
+  # Required: globally enable dynamic plugins.
+  enabled: true
+
+  # Required unless you use another path.
+  # Relative paths are resolved by CLIProxyAPI using its normal config/runtime path rules.
+  dir: "plugins"
+
+  configs:
+    # Must match the dynamic-library basename:
+    # header-credential-router.so -> header-credential-router
+    header-credential-router:
+      # Required: per-plugin enable flag.
+      enabled: true
+
+      # Recommended: scheduler-plugin priority.
+      # If several scheduler plugins are installed, higher-priority plugins are considered first.
+      priority: 100
+
+      header: "X-CPA-Credentials"
+      strategy: "round-robin"
+      session_affinity: true
+      session_affinity_ttl: "1h"
+      log_level: "debug"
+      missing_behavior: "fallback"
+      not_found_behavior: "reject"
+
+# Optional: write CPA logs to rotating log files instead of stdout.
+# logging-to-file: true
+```
+
+Important distinctions:
+
+- `plugins.enabled: true` is required. Enabling only `plugins.configs.header-credential-router.enabled` is not enough.
+- `debug: true` is **not required for routing**. It is only needed if you want CPA to emit the plugin's `debug`-level `host.log` records. With `log_level: info`, CPA can keep `debug: false`.
+- `logging-to-file: true` is optional. Without it, logs go to the normal CPA stdout/stderr destination.
+- `store-sources` is optional and is only for plugin-store/Home installation and updates. It is not required to load or run an already installed `.so/.dylib/.dll`.
+- No extra CPA switch is required for the plugin's request-interceptor capability. Once this plugin is loaded and registered, CPA invokes it automatically.
+- If multiple scheduler plugins are enabled, make sure this plugin's `priority` is high enough for the desired ordering.
+
+### Plugin file placement
+
+For Linux amd64, for example:
+
+```text
+<plugins dir>/linux/amd64/header-credential-router.so
+```
+
+CLIProxyAPI also supports loading from the root plugin directory, but the OS/architecture subdirectory is preferred for multi-platform layouts.
+
+The plugin ID is derived from the dynamic-library basename:
+
+```text
+header-credential-router.so
+        ↓
+header-credential-router
+```
+
+Therefore the key under `plugins.configs` must be exactly:
+
+```yaml
+header-credential-router:
+```
+
 ## CLIProxyAPI configuration
 
 ```yaml
