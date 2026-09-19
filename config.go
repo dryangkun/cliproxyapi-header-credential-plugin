@@ -5,20 +5,28 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type pluginConfig struct {
-	Header           string
-	MissingBehavior  string
-	NotFoundBehavior string
+	Header             string
+	Strategy           string
+	SessionAffinity    bool
+	SessionAffinityTTL time.Duration
+	MissingBehavior    string
+	NotFoundBehavior   string
 }
 
 func defaultConfig() pluginConfig {
 	return pluginConfig{
-		Header:           "X-CPA-Credential",
-		MissingBehavior:  "fallback",
-		NotFoundBehavior: "reject",
+		Header:             "X-CPA-Credentials",
+		Strategy:           "round-robin",
+		SessionAffinity:    true,
+		SessionAffinityTTL: time.Hour,
+		MissingBehavior:    "fallback",
+		NotFoundBehavior:   "reject",
 	}
 }
 
@@ -54,11 +62,20 @@ func loadedConfig() pluginConfig {
 
 func normalizeAndValidateConfig(cfg *pluginConfig) error {
 	cfg.Header = strings.TrimSpace(cfg.Header)
+	cfg.Strategy = strings.ToLower(strings.TrimSpace(cfg.Strategy))
 	cfg.MissingBehavior = strings.ToLower(strings.TrimSpace(cfg.MissingBehavior))
 	cfg.NotFoundBehavior = strings.ToLower(strings.TrimSpace(cfg.NotFoundBehavior))
 
 	if cfg.Header == "" {
 		return fmt.Errorf("header must not be empty")
+	}
+	switch cfg.Strategy {
+	case "round-robin", "weighted-round-robin", "fill-first":
+	default:
+		return fmt.Errorf("strategy must be round-robin, weighted-round-robin, or fill-first")
+	}
+	if cfg.SessionAffinityTTL <= 0 {
+		return fmt.Errorf("session_affinity_ttl must be greater than zero")
 	}
 	switch cfg.MissingBehavior {
 	case "fallback", "reject":
@@ -89,6 +106,20 @@ func decodeConfigYAML(raw []byte, cfg *pluginConfig) error {
 		switch key {
 		case "header":
 			cfg.Header = value
+		case "strategy":
+			cfg.Strategy = value
+		case "session_affinity":
+			parsed, err := strconv.ParseBool(strings.ToLower(value))
+			if err != nil {
+				return fmt.Errorf("session_affinity must be true or false")
+			}
+			cfg.SessionAffinity = parsed
+		case "session_affinity_ttl":
+			parsed, err := time.ParseDuration(value)
+			if err != nil {
+				return fmt.Errorf("session_affinity_ttl must be a Go duration such as 1h or 30m")
+			}
+			cfg.SessionAffinityTTL = parsed
 		case "missing_behavior":
 			cfg.MissingBehavior = value
 		case "not_found_behavior":
