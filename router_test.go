@@ -7,7 +7,7 @@ import (
 )
 
 func resetTestState() {
-	routingState = pluginRoutingState{}
+	routingState.reset()
 }
 
 func TestHeaderValuesCaseInsensitive(t *testing.T) {
