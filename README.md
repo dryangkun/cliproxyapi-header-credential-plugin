@@ -160,6 +160,8 @@ plugins:
       session_affinity: true
       session_affinity_ttl: "1h"
 
+      log_level: "info"
+
       missing_behavior: "fallback"
       not_found_behavior: "reject"
 ```
@@ -172,6 +174,7 @@ Configuration:
 | `strategy` | `round-robin` | `round-robin`, `weighted-round-robin`, or `fill-first`. |
 | `session_affinity` | `true` | Pin explicit client sessions to one credential. |
 | `session_affinity_ttl` | `1h` | Session binding lifetime. |
+| `log_level` | `info` | `off`, `info`, or `debug`. Use `debug` to inspect requested/candidate credential IDs and header stripping. |
 | `missing_behavior` | `fallback` | `fallback` or `reject` when the header is absent/empty. |
 | `not_found_behavior` | `reject` | `fallback` or `reject` when none of the requested IDs are currently eligible. |
 
@@ -189,6 +192,46 @@ curl https://your-cpa.example/v1/responses \
 ```
 
 Normally the client-facing Nginx layer should inject `X-CPA-Credentials` rather than allowing the client to choose it.
+
+## Routing logs
+
+The plugin writes routing diagnostics through CLIProxyAPI's native `host.log` callback, so the messages appear in the normal CPA logs.
+
+At `info` level it records important decisions such as:
+
+- selected credential ID and strategy;
+- session-affinity reuse;
+- session binding/rebinding;
+- requested pool with no currently eligible credential.
+
+Set:
+
+```yaml
+log_level: "debug"
+```
+
+to additionally log the requested credential IDs, CPA candidate IDs, and confirmation that the routing header was removed before the upstream request.
+
+## Routing header is never forwarded upstream
+
+`X-CPA-Credentials` is needed during scheduler selection, so it cannot be removed by Nginx before CPA receives the request.
+
+This plugin also registers CLIProxyAPI's request-interceptor capability. The flow is:
+
+```text
+scheduler reads X-CPA-Credentials
+        ↓
+credential selected
+        ↓
+request.intercept_after
+        ↓
+ClearHeaders: [X-CPA-Credentials]
+        ↓
+upstream request
+```
+
+Therefore the configured routing header is removed after credential selection and before the request is sent to the provider. The behavior follows the configured `header` value, so changing the header name also changes which header is stripped.
+
 
 ## Nginx sketch
 
