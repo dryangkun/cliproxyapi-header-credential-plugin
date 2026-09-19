@@ -15,6 +15,7 @@ type pluginConfig struct {
 	Strategy           string
 	SessionAffinity    bool
 	SessionAffinityTTL time.Duration
+	LogLevel           string
 	MissingBehavior    string
 	NotFoundBehavior   string
 }
@@ -25,6 +26,7 @@ func defaultConfig() pluginConfig {
 		Strategy:           "round-robin",
 		SessionAffinity:    true,
 		SessionAffinityTTL: time.Hour,
+		LogLevel:           "info",
 		MissingBehavior:    "fallback",
 		NotFoundBehavior:   "reject",
 	}
@@ -64,6 +66,7 @@ func loadedConfig() pluginConfig {
 func normalizeAndValidateConfig(cfg *pluginConfig) error {
 	cfg.Header = strings.TrimSpace(cfg.Header)
 	cfg.Strategy = strings.ToLower(strings.TrimSpace(cfg.Strategy))
+	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.MissingBehavior = strings.ToLower(strings.TrimSpace(cfg.MissingBehavior))
 	cfg.NotFoundBehavior = strings.ToLower(strings.TrimSpace(cfg.NotFoundBehavior))
 
@@ -77,6 +80,11 @@ func normalizeAndValidateConfig(cfg *pluginConfig) error {
 	}
 	if cfg.SessionAffinityTTL <= 0 {
 		return fmt.Errorf("session_affinity_ttl must be greater than zero")
+	}
+	switch cfg.LogLevel {
+	case "off", "info", "debug":
+	default:
+		return fmt.Errorf("log_level must be off, info, or debug")
 	}
 	switch cfg.MissingBehavior {
 	case "fallback", "reject":
@@ -121,6 +129,8 @@ func decodeConfigYAML(raw []byte, cfg *pluginConfig) error {
 				return fmt.Errorf("session_affinity_ttl must be a Go duration such as 1h or 30m")
 			}
 			cfg.SessionAffinityTTL = parsed
+		case "log_level":
+			cfg.LogLevel = value
 		case "missing_behavior":
 			cfg.MissingBehavior = value
 		case "not_found_behavior":
