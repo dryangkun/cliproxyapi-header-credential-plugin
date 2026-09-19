@@ -98,7 +98,7 @@ Behavior:
 3. If the bound credential becomes unavailable or is excluded during retry, the plugin selects another currently eligible credential and updates the binding.
 4. Session bindings expire after `session_affinity_ttl`.
 
-Because the scheduler API exposes headers and metadata but not the original request body, this plugin does not currently reproduce CLIProxyAPI's body-derived affinity signals such as `prompt_cache_key`, conversation IDs, message-history hashes, or LCP matching. Explicit Codex/Claude/OpenCode/pi session headers are supported.
+Because the scheduler API exposes headers and metadata but not the original request body, this plugin does not currently reproduce CLIProxyAPI's body-derived affinity signals such as `prompt_cache_key`, conversation IDs, message-history hashes, or LCP matching. Explicit Codex/Claude/OpenCode/pi session headers are supported.\n\nSession bindings are stored in plugin process memory. They are reset when CLIProxyAPI/plugin state is restarted or reconfigured, and they are not shared across multiple CLIProxyAPI replicas.
 
 ## Build
 
